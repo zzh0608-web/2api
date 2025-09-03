@@ -1,18 +1,14 @@
-// deno-lint-ignore-file no-explicit-any
-/**
- * Minimal OpenAI-compatible API for Deno Deploy
- * Endpoints:
- *   - GET /v1/models
- *   - POST /v1/chat/completions   (supports stream=true via SSE)
- *
- * Model mapping:
- *   deepseek-reasoner -> DeepSeek-R1
- *   deepseek-chat     -> DeepSeek-V3
- *
- * API key (optional):
- *   If DEEPSEEK_API_KEY is set, calls DeepSeek's API.
- *   Otherwise, returns a local mock completion so you can integrate without a key.
- */
+// Minimal OpenAI-compatible API for Deno Deploy
+// Endpoints:
+//   - GET /v1/models
+//   - POST /v1/chat/completions   (supports stream=true via SSE)
+//
+// Model mapping:
+//   deepseek-reasoner -> DeepSeek-R1
+//   deepseek-chat     -> DeepSeek-V3
+//
+// If DEEPSEEK_API_KEY is set in env, proxy real DeepSeek API.
+// Otherwise, returns a local mock completion for testing.
 
 const CORS_HEADERS = {
   "access-control-allow-origin": "*",
@@ -21,20 +17,215 @@ const CORS_HEADERS = {
   "access-control-allow-methods": "GET, POST, OPTIONS",
 };
 
-type ChatMessage = { role: "system" | "user" | "assistant" | "tool" | "function"; content: string };
-
-const MODEL_MAP: Record<string, string> = {
+const MODEL_MAP = {
   "deepseek-reasoner": "DeepSeek-R1",
   "deepseek-chat": "DeepSeek-V3",
 };
 
-function json(data: any, init: ResponseInit = {}) {
+function json(data, init = {}) {
   return new Response(JSON.stringify(data), {
-    headers: { "content-type": "application/json; charset=utf-8", ...CORS_HEADERS, ...(init.headers ?? {}) },
-    status: init.status ?? 200,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      ...CORS_HEADERS,
+      ...(init.headers || {}),
+    },
+    status: init.status || 200,
   });
 }
 
+function badRequest(msg, extra) {
+  return json(
+    { error: { message: msg, type: "invalid_request_error", ...extra } },
+    { status: 400 },
+  );
+}
+
+function notFound(msg = "Not found") {
+  return json({ error: { message: msg, type: "invalid_request_error" } }, {
+    status: 404,
+  });
+}
+
+function toUnixSeconds(d = new Date()) {
+  return Math.floor(d.getTime() / 1000);
+}
+
+// --- GET /v1/models ---
+function handleModels() {
+  const data = [
+    { id: "deepseek-reasoner", object: "model", owned_by: "selfhost" },
+    { id: "deepseek-chat", object: "model", owned_by: "selfhost" },
+  ];
+  return json({ object: "list", data });
+}
+
+function buildCompletion({ id = crypto.randomUUID(), model, content }) {
+  return {
+    id,
+    object: "chat.completion",
+    created: toUnixSeconds(),
+    model,
+    choices: [
+      {
+        index: 0,
+        message: { role: "assistant", content },
+        finish_reason: "stop",
+      },
+    ],
+    usage: {
+      prompt_tokens: 0,
+      completion_tokens: Math.max(1, Math.ceil(content.length / 3)),
+      total_tokens: Math.max(1, Math.ceil(content.length / 3)),
+    },
+  };
+}
+
+function localMockReply(messages) {
+  const lastUser = [...messages].reverse().find((m) => m.role === "user")
+    ?.content || "";
+  return lastUser.trim()
+    ? `你说：“${lastUser}”。这是本地 mock 回复（无密钥情况下）。`
+    : "这是本地 mock 回复（无密钥情况下）。";
+}
+
+async function streamMock(model, content) {
+  const encoder = new TextEncoder();
+
+  const stream = new ReadableStream({
+    start(controller) {
+      const send = (obj) => {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
+      };
+      const id = crypto.randomUUID();
+
+      send({
+        id,
+        object: "chat.completion.chunk",
+        created: toUnixSeconds(),
+        model,
+        choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }],
+      });
+
+      const pieces = content.match(/[\s\S]{1,25}/g) || [content];
+      let i = 0;
+
+      const interval = setInterval(() => {
+        if (i >= pieces.length) {
+          send({
+            id,
+            object: "chat.completion.chunk",
+            created: toUnixSeconds(),
+            model,
+            choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+          });
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          clearInterval(interval);
+          controller.close();
+          return;
+        }
+        send({
+          id,
+          object: "chat.completion.chunk",
+          created: toUnixSeconds(),
+          model,
+          choices: [{ index: 0, delta: { content: pieces[i++] }, finish_reason: null }],
+        });
+      }, 30);
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      ...CORS_HEADERS,
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+    },
+  });
+}
+
+async function callDeepSeek({ model, messages, stream }) {
+  const DS_KEY = Deno.env.get("DEEPSEEK_API_KEY");
+  if (!DS_KEY) return null;
+
+  const mapped = MODEL_MAP[model];
+  if (!mapped) throw new Error(`Unsupported model: ${model}`);
+
+  const body = { model: mapped, messages, stream: !!stream };
+
+  const resp = await fetch("https://api.deepseek.com/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "authorization": `Bearer ${DS_KEY}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    return badRequest("DeepSeek API error", { status: resp.status, detail: text });
+  }
+
+  if (stream) {
+    const headers = new Headers(resp.headers);
+    for (const [k, v] of Object.entries(CORS_HEADERS)) headers.set(k, v);
+    return new Response(resp.body, { headers, status: 200 });
+  }
+
+  const data = await resp.json();
+  return json(data);
+}
+
+async function handleChatCompletions(req) {
+  let body;
+  try {
+    body = await req.json();
+  } catch {
+    return badRequest("Invalid JSON body");
+  }
+
+  const { model, messages, stream = false } = body || {};
+  if (!model) return badRequest("Missing 'model'");
+  if (!Array.isArray(messages)) return badRequest("Missing or invalid 'messages'");
+
+  const dsResponse = await callDeepSeek({ model, messages, stream });
+  if (dsResponse) return dsResponse;
+
+  const mapped = MODEL_MAP[model];
+  if (!mapped) return badRequest(`Unsupported model: ${model}`);
+
+  const content = localMockReply(messages);
+
+  if (stream) {
+    return streamMock(mapped, content);
+  } else {
+    return json(buildCompletion({ model: mapped, content }));
+  }
+}
+
+function router(req) {
+  const url = new URL(req.url);
+  const { pathname } = url;
+
+  if (req.method === "OPTIONS") {
+    return new Response(null, { headers: CORS_HEADERS });
+  }
+
+  if (req.method === "GET" && pathname === "/v1/models") {
+    return handleModels();
+  }
+
+  if (req.method === "POST" && pathname === "/v1/chat/completions") {
+    return handleChatCompletions(req);
+  }
+
+  return notFound("Route not found");
+}
+
+export default {
+  fetch: (req) => router(req),
+};
 function badRequest(msg: string, extra?: Record<string, unknown>) {
   return json({ error: { message: msg, type: "invalid_request_error", ...extra } }, { status: 400 });
 }
