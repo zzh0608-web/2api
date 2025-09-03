@@ -1,9 +1,9 @@
-// main.js - Deno Deploy 兼容的 OpenAI API 封装
+// main.js - 修复后的版本
 
 const UPSTREAM_URL = "https://ai-chatbot-starter.edgeone.app/api/ai";
 
-// 模型映射关系
-const MODEL_MAPPING = {
+// 反向模型映射（用于显示，但不用于上游请求）
+const MODEL_DISPLAY_NAMES = {
   "deepseek-reasoner": "DeepSeek-R1",
   "deepseek-chat": "DeepSeek-V3"
 };
@@ -68,10 +68,12 @@ async function handleChatCompletions(request) {
       });
     }
 
-    // 构建上游请求体，使用映射后的模型名
-    const upstreamModel = MODEL_MAPPING[requestBody.model] || requestBody.model || "deepseek-chat";
+    // **重要修改：不进行模型名映射，直接使用原始模型名**
+    const modelName = requestBody.model || "deepseek-chat";
+    
+    // 构建上游请求体
     const upstreamBody = {
-      model: upstreamModel,
+      model: modelName,  // 直接传递原始模型名
       messages: requestBody.messages,
       temperature: requestBody.temperature || 1,
       top_p: requestBody.top_p || 1,
@@ -90,7 +92,7 @@ async function handleChatCompletions(request) {
 
     // 处理流式响应
     if (requestBody.stream) {
-      return handleStreamResponse(upstreamBody, requestBody.model);
+      return handleStreamResponse(upstreamBody, modelName);
     }
 
     // 发送请求到上游服务
@@ -99,13 +101,17 @@ async function handleChatCompletions(request) {
       headers: {
         "Content-Type": "application/json",
         "Accept": "*/*",
-        "User-Agent": "Mozilla/5.0 (compatible; DenoProxy/1.0)"
+        "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Origin": "https://ai-chatbot-starter.edgeone.app",
+        "Referer": "https://ai-chatbot-starter.edgeone.app/",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
       },
       body: JSON.stringify(upstreamBody)
     });
 
     if (!upstreamResponse.ok) {
       const errorText = await upstreamResponse.text();
+      console.error("Upstream error:", errorText);
       return new Response(JSON.stringify({
         error: {
           message: `Upstream service error: ${errorText}`,
@@ -120,26 +126,46 @@ async function handleChatCompletions(request) {
 
     const responseData = await upstreamResponse.json();
     
+    // 提取响应内容 - 处理不同的响应格式
+    let content = "";
+    if (typeof responseData === "string") {
+      content = responseData;
+    } else if (responseData.content) {
+      content = responseData.content;
+    } else if (responseData.message) {
+      content = responseData.message;
+    } else if (responseData.text) {
+      content = responseData.text;
+    } else if (responseData.choices && responseData.choices[0]) {
+      content = responseData.choices[0].message?.content || responseData.choices[0].text || "";
+    } else {
+      // 如果都没有，尝试将整个响应转为字符串
+      content = JSON.stringify(responseData);
+    }
+    
     // 转换为 OpenAI 格式的响应
     const openAIResponse = {
       id: `chatcmpl-${generateId()}`,
       object: "chat.completion",
       created: Math.floor(Date.now() / 1000),
-      model: requestBody.model || "deepseek-chat",
+      model: modelName,
       choices: [{
         index: 0,
         message: {
           role: "assistant",
-          content: responseData.content || responseData.message || responseData.text || "No response content"
+          content: content
         },
         finish_reason: "stop"
       }],
       usage: responseData.usage || {
-        prompt_tokens: 0,
-        completion_tokens: 0,
+        prompt_tokens: estimateTokens(JSON.stringify(requestBody.messages)),
+        completion_tokens: estimateTokens(content),
         total_tokens: 0
       }
     };
+    
+    // 计算总tokens
+    openAIResponse.usage.total_tokens = openAIResponse.usage.prompt_tokens + openAIResponse.usage.completion_tokens;
 
     return new Response(JSON.stringify(openAIResponse), {
       status: 200,
@@ -167,39 +193,68 @@ async function handleStreamResponse(upstreamBody, modelName) {
   const stream = new ReadableStream({
     async start(controller) {
       try {
-        // 发送SSE数据
+        // 发送SSE数据的辅助函数
         const sendSSE = (data) => {
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
         };
 
-        // 模拟流式响应（实际应从上游获取）
+        // 请求上游服务
         const response = await fetch(UPSTREAM_URL, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "Accept": "*/*"
+            "Accept": "*/*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Origin": "https://ai-chatbot-starter.edgeone.app",
+            "Referer": "https://ai-chatbot-starter.edgeone.app/",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
           },
           body: JSON.stringify(upstreamBody)
         });
 
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`Upstream error: ${errorText}`);
+        }
+
         const responseData = await response.json();
-        const content = responseData.content || responseData.message || responseData.text || "";
+        
+        // 提取内容
+        let content = "";
+        if (typeof responseData === "string") {
+          content = responseData;
+        } else if (responseData.content) {
+          content = responseData.content;
+        } else if (responseData.message) {
+          content = responseData.message;
+        } else if (responseData.text) {
+          content = responseData.text;
+        } else if (responseData.choices && responseData.choices[0]) {
+          content = responseData.choices[0].message?.content || responseData.choices[0].text || "";
+        } else {
+          content = JSON.stringify(responseData);
+        }
         
         // 分块发送内容
-        const chunks = content.match(/.{1,10}/g) || [];
+        const chunkSize = 20; // 每块字符数
+        const chunks = [];
+        for (let i = 0; i < content.length; i += chunkSize) {
+          chunks.push(content.slice(i, i + chunkSize));
+        }
+        
         for (const chunk of chunks) {
           sendSSE({
             id: `chatcmpl-${generateId()}`,
             object: "chat.completion.chunk",
             created: Math.floor(Date.now() / 1000),
-            model: modelName || "deepseek-chat",
+            model: modelName,
             choices: [{
               index: 0,
               delta: { content: chunk },
               finish_reason: null
             }]
           });
-          await new Promise(resolve => setTimeout(resolve, 50));
+          await new Promise(resolve => setTimeout(resolve, 30));
         }
 
         // 发送结束标记
@@ -207,7 +262,7 @@ async function handleStreamResponse(upstreamBody, modelName) {
           id: `chatcmpl-${generateId()}`,
           object: "chat.completion.chunk",
           created: Math.floor(Date.now() / 1000),
-          model: modelName || "deepseek-chat",
+          model: modelName,
           choices: [{
             index: 0,
             delta: {},
@@ -218,6 +273,7 @@ async function handleStreamResponse(upstreamBody, modelName) {
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         controller.close();
       } catch (error) {
+        console.error("Stream error:", error);
         controller.error(error);
       }
     }
@@ -235,7 +291,13 @@ async function handleStreamResponse(upstreamBody, modelName) {
 
 // 生成随机ID
 function generateId() {
-  return Math.random().toString(36).substring(2, 15);
+  return Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
+}
+
+// 估算token数量（简单实现）
+function estimateTokens(text) {
+  // 粗略估算：每4个字符约等于1个token
+  return Math.ceil(text.length / 4);
 }
 
 // 主请求处理器
@@ -268,11 +330,13 @@ async function handleRequest(request) {
     case "/":
       return new Response(JSON.stringify({
         message: "OpenAI API Proxy for DeepSeek",
+        version: "1.0.0",
         endpoints: {
           models: "/v1/models",
           chat: "/v1/chat/completions"
         },
-        supported_models: Object.keys(MODEL_MAPPING)
+        supported_models: ["deepseek-chat", "deepseek-reasoner"],
+        model_mappings: MODEL_DISPLAY_NAMES
       }), {
         status: 200,
         headers: CORS_HEADERS
@@ -303,17 +367,7 @@ async function handleRequest(request) {
   });
 }
 
-// Deno Deploy 入口点 - 只使用 addEventListener
+// Deno Deploy 入口点
 addEventListener("fetch", (event) => {
   event.respondWith(handleRequest(event.request));
 });
-
-// 仅在本地开发环境使用 Deno.serve
-// 通过环境变量 DENO_DEPLOYMENT_ID 判断是否在 Deno Deploy 环境
-if (typeof Deno !== "undefined" && !Deno.env.get("DENO_DEPLOYMENT_ID")) {
-  // 只在本地运行时才使用 Deno.serve
-  if (Deno.serve) {
-    console.log("Running in local development mode on http://localhost:8000");
-    Deno.serve({ port: 8000 }, handleRequest);
-  }
-}
