@@ -303,12 +303,17 @@ async function handleRequest(request) {
   });
 }
 
-// Deno Deploy 入口点
+// Deno Deploy 入口点 - 只使用 addEventListener
 addEventListener("fetch", (event) => {
   event.respondWith(handleRequest(event.request));
 });
 
-// 对于 Deno.serve（本地测试）
-if (typeof Deno !== "undefined" && Deno.serve) {
-  Deno.serve({ port: 8000 }, handleRequest);
+// 仅在本地开发环境使用 Deno.serve
+// 通过环境变量 DENO_DEPLOYMENT_ID 判断是否在 Deno Deploy 环境
+if (typeof Deno !== "undefined" && !Deno.env.get("DENO_DEPLOYMENT_ID")) {
+  // 只在本地运行时才使用 Deno.serve
+  if (Deno.serve) {
+    console.log("Running in local development mode on http://localhost:8000");
+    Deno.serve({ port: 8000 }, handleRequest);
+  }
 }
