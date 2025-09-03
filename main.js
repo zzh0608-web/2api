@@ -1,4 +1,4 @@
-// main.ts - OpenAI 兼容接口封装
+// main.js - OpenAI 兼容接口封装（纯 JavaScript）
 import { serve } from "https://deno.land/std@0.208.0/http/server.ts";
 
 const TARGET_API_URL = "https://ai-chatbot-starter.edgeone.app/api/ai";
@@ -59,7 +59,7 @@ async function handleModels() {
 /**
  * 处理非流式响应
  */
-async function handleNonStreamingChat(messages: any[], model: string) {
+async function handleNonStreamingChat(messages, model) {
   const targetModel = MODEL_MAPPING[model] || model;
   
   const response = await fetch(TARGET_API_URL, {
@@ -119,7 +119,7 @@ async function handleNonStreamingChat(messages: any[], model: string) {
 /**
  * 处理流式响应
  */
-async function handleStreamingChat(messages: any[], model: string) {
+async function handleStreamingChat(messages, model) {
   const targetModel = MODEL_MAPPING[model] || model;
   
   const encoder = new TextEncoder();
@@ -251,7 +251,7 @@ async function handleStreamingChat(messages: any[], model: string) {
 /**
  * 处理 /v1/chat/completions 请求
  */
-async function handleChatCompletion(request: Request) {
+async function handleChatCompletion(request) {
   try {
     const body = await request.json();
     const { messages, model = "deepseek-chat", stream = false } = body;
@@ -321,7 +321,7 @@ async function handleChatCompletion(request: Request) {
 /**
  * 主请求处理器
  */
-async function handler(request: Request): Promise<Response> {
+async function handler(request) {
   const url = new URL(request.url);
   const path = url.pathname;
 
