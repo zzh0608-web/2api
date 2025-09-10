@@ -3,7 +3,7 @@
 
 /* ====================== 配置与模型映射 ====================== */
 
-const MaxContextTokens = 2000; // 与 Go 常量一致
+const MaxContextTokens = 2000; 
 
 const modelMap = {
   "deepseek-reasoner": "deepseek_r1",
@@ -63,7 +63,7 @@ function isAgentModel(id) {
   return agentModelIDs.includes(id);
 }
 
-/* ====================== 类型帮助（注释） ======================
+/* ====================== 类型帮助======================
 OpenAI-like Request:
 {
   "model": "deepseek-chat",
@@ -110,7 +110,7 @@ function countTokens(content) {
       if (part?.type === "image_url") imageCount++;
     }
   }
-  return base + imageCount * 85; // 与 Go 估算一致
+  return base + imageCount * 85; 
 }
 
 function countTokensForMessages(messages) {
@@ -193,7 +193,7 @@ function cookieHeaderStr(map) {
   return Object.entries(map).map(([k, v]) => `${k}=${v}`).join(";");
 }
 
-/* ====================== you.com 上传与辅助 ====================== */
+/* ====================== you.com 上传 ====================== */
 
 async function getNonce(dsToken) {
   const resp = await fetch("https://you.com/api/get_nonce", {
@@ -344,7 +344,7 @@ async function streamOpenAIChunks(youUrl, youHeaders, modelForResp) {
       let expectData = false;
 
       // 设置 OpenAI SSE 响应头的起始（不发送 role 起始帧，保持与原代码兼容性）
-      // 注意：原代码没有发送 [DONE]，这里也不发送。
+      // 注意：没有发送 [DONE]，这里也不发送。
 
       function sendChunk(content) {
         const chunk = {
@@ -397,7 +397,7 @@ async function streamOpenAIChunks(youUrl, youHeaders, modelForResp) {
 
 /* ====================== 路由与主处理 ====================== */
 
-let originalModel = ""; // 与 Go 一样用全局（注意并发下会被覆盖）
+let originalModel = ""; 
 
 function corsHeaders() {
   return {
@@ -430,7 +430,7 @@ Deno.serve(async (req) => {
     });
   }
 
-  // 非 chat-completions 路径：返回服务状态
+  // 非 chat-completions 
   if (
     url.pathname !== "/v1/chat/completions" &&
     url.pathname !== "/none/v1/chat/completions" &&
@@ -506,7 +506,7 @@ Deno.serve(async (req) => {
     if (entry.Question) {
       const tk = countTokensForMessages([{ role: "user", content: entry.Question }]);
       if (tk >= 30) {
-        await getNonce(dsToken).catch(() => {}); // 仅为保持流程
+        await getNonce(dsToken).catch(() => {}); 
         const fileName = generateShortFileName() + ".txt";
         const bytes = addUTF8BOM(entry.Question);
         const up = await uploadFile(dsToken, bytes, fileName);
@@ -534,7 +534,7 @@ Deno.serve(async (req) => {
     }
   }
 
-  // 处理最后一条消息：文本/图片 +（必要时）上传为文件
+  // 处理最后一条消息
   const lastMessage = openAIReq.messages[openAIReq.messages.length - 1];
   const lastTokens = countTokensForMessages([lastMessage]);
   let finalQuery = "", imageSourcesJSON = "";
@@ -571,7 +571,7 @@ Deno.serve(async (req) => {
     } catch { /* ignore */ }
   }
 
-  // 组装 you.com streamingSearch 请求
+  // 组装 you.com 请求
   const chatId = crypto.randomUUID();
   const conversationTurnId = crypto.randomUUID();
   const traceId = `${chatId}|${conversationTurnId}|${new Date().toISOString()}`;
@@ -654,7 +654,7 @@ Deno.serve(async (req) => {
       id: "chatcmpl-" + Math.floor(Date.now() / 1000),
       object: "chat.completion",
       created: Math.floor(Date.now() / 1000),
-      model: modelForResp, // 映射回 OpenAI 名称（与 Go 相同策略）
+      model: modelForResp, // 映射回 OpenAI 名称
       choices: [{
         message: { role: "assistant", content: full },
         index: 0,
@@ -666,7 +666,7 @@ Deno.serve(async (req) => {
     });
   }
 
-  // 流式：逐 token 转发为 OpenAI chunk（不发送 [DONE]，与 Go 保持一致）
+  // 流式：逐 token 转发为 OpenAI chunk
   const streamResp = await streamOpenAIChunks(youUrl, youHeaders, modelForResp);
   const h = new Headers(streamResp.headers);
   corsHeaders() && Object.entries(corsHeaders()).forEach(([k, v]) => h.set(k, v));
