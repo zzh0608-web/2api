@@ -205,7 +205,7 @@ async function getNonce(dsToken) {
 
 async function uploadFile(dsToken, bytes, filename) {
   const form = new FormData();
-  // 以 text/plain 为主（与原逻辑写 .txt 一致），也能上传图像
+  // 以 text/plain 为主（.txt 一致），也能上传图像
   form.append("file", new File([bytes], filename));
   const resp = await fetch("https://you.com/api/upload", {
     method: "POST",
@@ -607,7 +607,7 @@ Deno.serve(async (req) => {
 
   const youUrl = "https://you.com/api/streamingSearch?" + params.toString();
 
-  // 请求头与 Cookie（包括 DS 与大量 UA 伪装；完全复刻会很长，这里保留关键字段）
+  // 请求头与 Cookie（包括 DS 与大量 UA 伪装）
   const youHeaders = {
     "Accept": "text/event-stream",
     "User-Agent":
@@ -638,7 +638,7 @@ Deno.serve(async (req) => {
       headers: corsHeaders(),
     });
   }
-  probe.body?.cancel(); // 我们不复用，保持与原“再次请求”一致
+  probe.body?.cancel(); // 不复用，保持与原“再次请求”一致
 
   // 根据 stream 参数选择处理函数（会再请求一次 you.com）
   const modelForResp = reverseMap[mapModelName(originalModel)] ?? "deepseek-chat";
